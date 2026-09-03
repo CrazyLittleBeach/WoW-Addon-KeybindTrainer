@@ -1,0 +1,8 @@
+## Interface: 120100
+## Title: Keybind Trainer
+## Notes: /kbt or /keybindtrainer, press ESC to finish
+## Author: Neotrius
+## Version: 12.1.0
+## SavedVariables: KeybindTrainerDB
+
+KeybindTrainer.lua
