@@ -1,8 +1,8 @@
 ## Interface: 120100
 ## Title: Keybind Trainer
-## Notes: /kbt or /keybindtrainer, press ESC to finish
+## Notes: /kbt or /keybindtrainer, press ESC to finish. Settings: AddOns > Keybind Trainer
 ## Author: Neotrius
-## Version: 12.1.0.2
-## SavedVariables: KeybindTrainerDB
+## Version: 12.1.0.5
+## SavedVariablesPerCharacter: KeybindTrainerDB
 
 KeybindTrainer.lua
