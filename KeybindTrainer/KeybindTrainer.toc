@@ -2,7 +2,7 @@
 ## Title: Keybind Trainer
 ## Notes: /kbt or /keybindtrainer, press ESC to finish
 ## Author: Neotrius
-## Version: 12.1.0.1
+## Version: 12.1.0.2
 ## SavedVariables: KeybindTrainerDB
 
 KeybindTrainer.lua

@@ -54,6 +54,101 @@ local activeBinds = {}
 local currentBindKeys = {}
 -- Variable to remember the last chosen skill to prevent back-to-back duplicates
 local lastBindIndex = -1
+-- Per-session stats keyed by bind index: name, bindText, icon, hits, totalTime
+local sessionStats = {}
+-- GetTime() when the current prompt appeared (start of the reaction counter)
+local promptStart = 0
+-- GetTime() when the training session started
+local sessionStart = 0
+
+-- Results dialog shown after the player stops training (full screen height so the list rarely needs scrolling)
+local results = CreateFrame("Frame", "KeybindTrainerResultsFrame", UIParent, "BackdropTemplate")
+results:SetWidth(560)
+results:SetPoint("TOP", UIParent, "TOP", 0, 0)
+results:SetPoint("BOTTOM", UIParent, "BOTTOM", 0, 0)
+results:SetFrameStrata("DIALOG")
+results:SetToplevel(true)
+results:EnableMouse(true)
+results:SetClampedToScreen(true)
+results:Hide()
+results:SetBackdrop({
+    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+    tile = true,
+    tileSize = 32,
+    edgeSize = 32,
+    insets = { left = 8, right = 8, top = 8, bottom = 8 }
+})
+
+results.title = results:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+results.title:SetPoint("TOP", 0, -18)
+results.title:SetText("Training Results")
+
+results.summary = results:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+results.summary:SetPoint("TOP", results.title, "BOTTOM", 0, -6)
+
+local closeX = CreateFrame("Button", nil, results, "UIPanelCloseButton")
+closeX:SetPoint("TOPRIGHT", -2, -2)
+closeX:SetScript("OnClick", function() results:Hide() end)
+
+-- Column headers aligned with the scroll rows below
+local headerY = -68
+local headerSpecs = {
+    { text = "Ability",  x = 42 },
+    { text = "Keybind",  x = 250 },
+    { text = "Presses",  x = 370 },
+    { text = "Avg Time", x = 450 },
+}
+for _, spec in ipairs(headerSpecs) do
+    local fs = results:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    fs:SetPoint("TOPLEFT", spec.x, headerY)
+    fs:SetText(spec.text)
+end
+
+local scroll = CreateFrame("ScrollFrame", "KeybindTrainerResultsScroll", results, "UIPanelScrollFrameTemplate")
+scroll:SetPoint("TOPLEFT", 16, -88)
+scroll:SetPoint("BOTTOMRIGHT", -36, 48)
+
+local content = CreateFrame("Frame", nil, scroll)
+content:SetSize(490, 1)
+scroll:SetScrollChild(content)
+
+scroll:EnableMouseWheel(true)
+scroll:SetScript("OnMouseWheel", function(self, delta)
+    local new = self:GetVerticalScroll() - (delta * 24)
+    new = math.max(0, math.min(self:GetVerticalScrollRange(), new))
+    self:SetVerticalScroll(new)
+end)
+
+local closeBtn = CreateFrame("Button", nil, results, "UIPanelButtonTemplate")
+closeBtn:SetSize(100, 22)
+closeBtn:SetPoint("BOTTOM", 0, 16)
+closeBtn:SetText("Close")
+closeBtn:SetScript("OnClick", function() results:Hide() end)
+
+results:SetScript("OnShow", function(self)
+    -- Stretch to the current screen height in case resolution or UI scale changed
+    self:ClearAllPoints()
+    self:SetPoint("TOP", UIParent, "TOP", 0, 0)
+    self:SetPoint("BOTTOM", UIParent, "BOTTOM", 0, 0)
+    self:SetWidth(560)
+    self:EnableKeyboard(true)
+    self:Raise()
+end)
+results:SetScript("OnKeyDown", function(self, key)
+    if key == "ESCAPE" then
+        self:SetPropagateKeyboardInput(false)
+        self:Hide()
+    else
+        -- Let gameplay keys through while reading the table
+        self:SetPropagateKeyboardInput(true)
+    end
+end)
+-- Also close via the default UI ESC handler if this frame is not capturing keys
+tinsert(UISpecialFrames, "KeybindTrainerResultsFrame")
+
+local resultRows = {}
+local ROW_HEIGHT = 22
 
 -- Each extra bar has a fixed slot range. Bar 1 pages/swaps (stances, stealth), so its
 -- slot is read from the live button when possible. Binding names are what GetBindingKey uses.
@@ -213,6 +308,115 @@ local function FormatKeys(keys)
     return table.concat(texts, "  /  ")
 end
 
+local function FormatDuration(seconds)
+    seconds = math.max(0, seconds or 0)
+    local m = math.floor(seconds / 60)
+    local s = math.floor((seconds % 60) + 0.5)
+    if s >= 60 then
+        m = m + 1
+        s = 0
+    end
+    if m > 0 then
+        return string.format("%dm %ds", m, s)
+    end
+    return string.format("%ds", s)
+end
+
+local function AcquireResultRow(i)
+    local row = resultRows[i]
+    if row then return row end
+    row = CreateFrame("Frame", nil, content)
+    row:SetSize(490, ROW_HEIGHT)
+    row.bg = row:CreateTexture(nil, "BACKGROUND")
+    row.bg:SetAllPoints(true)
+    row.icon = row:CreateTexture(nil, "ARTWORK")
+    row.icon:SetSize(16, 16)
+    row.icon:SetPoint("LEFT", 4, 0)
+    row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    row.name:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
+    row.name:SetSize(190, ROW_HEIGHT)
+    row.name:SetJustifyH("LEFT")
+    row.name:SetWordWrap(false)
+    row.bind = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    row.bind:SetPoint("LEFT", 234, 0)
+    row.bind:SetSize(120, ROW_HEIGHT)
+    row.bind:SetJustifyH("LEFT")
+    row.bind:SetWordWrap(false)
+    row.hits = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    row.hits:SetPoint("LEFT", 354, 0)
+    row.hits:SetSize(60, ROW_HEIGHT)
+    row.hits:SetJustifyH("CENTER")
+    row.avg = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    row.avg:SetPoint("LEFT", 434, 0)
+    row.avg:SetSize(56, ROW_HEIGHT)
+    row.avg:SetJustifyH("LEFT")
+    resultRows[i] = row
+    return row
+end
+
+local function ShowResults()
+    local list = {}
+    local totalHits = 0
+    for _, s in pairs(sessionStats) do
+        table.insert(list, s)
+        totalHits = totalHits + s.hits
+    end
+    -- Slowest average first (the binds that need more practice); unanswered prompts at the bottom
+    table.sort(list, function(a, b)
+        if (a.hits == 0) ~= (b.hits == 0) then
+            return a.hits > 0
+        end
+        local avgA = a.hits > 0 and (a.totalTime / a.hits) or 0
+        local avgB = b.hits > 0 and (b.totalTime / b.hits) or 0
+        if avgA ~= avgB then return avgA > avgB end
+        return a.name < b.name
+    end)
+
+    results.summary:SetText(string.format("Duration: %s   |   Presses: %d   |   Abilities: %d",
+        FormatDuration(GetTime() - sessionStart), totalHits, #list))
+
+    for i, s in ipairs(list) do
+        local row = AcquireResultRow(i)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", 0, -(i - 1) * ROW_HEIGHT)
+        row:Show()
+        if i % 2 == 0 then
+            row.bg:SetColorTexture(1, 1, 1, 0.05)
+        else
+            row.bg:SetColorTexture(0, 0, 0, 0)
+        end
+        row.icon:SetTexture(s.icon)
+        row.name:SetText(s.name)
+        row.bind:SetText(s.bindText)
+        row.hits:SetText(s.hits)
+        if s.hits > 0 then
+            row.avg:SetText(string.format("%.2fs", s.totalTime / s.hits))
+        else
+            row.avg:SetText("—")
+        end
+    end
+    for i = #list + 1, #resultRows do
+        resultRows[i]:Hide()
+    end
+    content:SetHeight(math.max(1, #list * ROW_HEIGHT))
+    scroll:SetVerticalScroll(0)
+    results:Show()
+end
+
+local function StopTraining()
+    if not f:IsShown() then return end
+    f:Hide()
+    print("|cFF00FFFF[KeybindTrainer]|r Training stopped.")
+    ShowResults()
+end
+
+local function RecordHit()
+    local s = sessionStats[lastBindIndex]
+    if not s then return end
+    s.hits = s.hits + 1
+    s.totalTime = s.totalTime + (GetTime() - promptStart)
+end
+
 -- Function to pick and display the next random skill
 local function NextBind()
     -- If no binds were found during the scan, stop and warn the user
@@ -240,6 +444,18 @@ local function NextBind()
     -- Retrieve the selected skill's data
     local bind = activeBinds[rand]
     
+    -- Start (or reset) this ability's stats and reaction counter
+    if not sessionStats[rand] then
+        sessionStats[rand] = {
+            name = bind.name,
+            bindText = FormatKeys(bind.keys),
+            icon = bind.icon,
+            hits = 0,
+            totalTime = 0,
+        }
+    end
+    promptStart = GetTime()
+    
     -- Update the UI with the new icon, spell name, and gray keybind hint
     f.icon:SetTexture(bind.icon)
     f.text:SetText(bind.name)
@@ -251,10 +467,9 @@ end
 
 -- Function to process user input (from keyboard or mouse)
 local function CheckInput(inputKey)
-    -- If the user presses Escape, close the trainer
+    -- If the user presses Escape, close the trainer and show the results table
     if inputKey == "ESCAPE" then
-        f:Hide()
-        print("|cFF00FFFF[KeybindTrainer]|r Training stopped.")
+        StopTraining()
         return
     end
     
@@ -289,7 +504,7 @@ local function CheckInput(inputKey)
     
     -- If the user pressed the correct key
     if match then
-        -- Instantly move to the next skill
+        RecordHit()
         NextBind()
     else
         -- If the user made a mistake, flash the background red
@@ -322,18 +537,24 @@ end)
 SLASH_KEYBINDTRAINER1 = "/kbt"
 SLASH_KEYBINDTRAINER2 = "/keybindtrainer"
 SlashCmdList["KEYBINDTRAINER"] = function()
-    -- If the trainer is already open, close it
+    -- Results window is open: treat /kbt as close
+    if results:IsShown() then
+        results:Hide()
+        return
+    end
+    -- If the trainer is already open, stop and show results
     if f:IsShown() then
-        f:Hide()
-        print("|cFF00FFFF[KeybindTrainer]|r Training stopped.")
+        StopTraining()
     else
         -- Scan the action bars for updated spells/binds
         RefreshBinds()
         
         -- If we found valid binds, start the trainer
         if #activeBinds > 0 then
-            -- Reset the duplicate prevention index for a fresh start
-            lastBindIndex = -1 
+            -- Reset the duplicate prevention index and session stats for a fresh start
+            lastBindIndex = -1
+            sessionStats = {}
+            sessionStart = GetTime()
             -- Show the UI
             f:Show()
             -- Load the first random skill
