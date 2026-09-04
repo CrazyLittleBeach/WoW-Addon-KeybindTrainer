@@ -29,6 +29,14 @@ f.text:SetPoint("TOP", f.icon, "BOTTOM", 0, -10)
 -- Set a default placeholder text
 f.text:SetText("Press a bind")
 
+-- Create a smaller gray font string to show the keybind as a reminder
+f.bindText = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+-- Anchor it just below the spell name
+f.bindText:SetPoint("TOP", f.text, "BOTTOM", 0, -50)
+-- Gray so it reads as a hint, not the main prompt
+f.bindText:SetTextColor(0.2, 0.2, 0.2)
+f.bindText:SetText("")
+
 -- Hide the frame by default when the game loads
 f:Hide()
 
@@ -47,61 +55,162 @@ local currentBindKeys = {}
 -- Variable to remember the last chosen skill to prevent back-to-back duplicates
 local lastBindIndex = -1
 
--- Map all standard and multi-action bar slots (1 to 120+) to their internal WoW binding names
-local slotToBinding = {}
-for i = 1, 12 do slotToBinding[i] = "ACTIONBUTTON"..i end
-for i = 1, 12 do slotToBinding[60+i] = "MULTIACTIONBAR1BUTTON"..i end
-for i = 1, 12 do slotToBinding[72+i] = "MULTIACTIONBAR2BUTTON"..i end
-for i = 1, 12 do slotToBinding[84+i] = "MULTIACTIONBAR3BUTTON"..i end
-for i = 1, 12 do slotToBinding[96+i] = "MULTIACTIONBAR4BUTTON"..i end
-for i = 1, 12 do slotToBinding[132+i] = "MULTIACTIONBAR5BUTTON"..i end
-for i = 1, 12 do slotToBinding[144+i] = "MULTIACTIONBAR6BUTTON"..i end
-for i = 1, 12 do slotToBinding[156+i] = "MULTIACTIONBAR7BUTTON"..i end
+-- Each extra bar has a fixed slot range. Bar 1 pages/swaps (stances, stealth), so its
+-- slot is read from the live button when possible. Binding names are what GetBindingKey uses.
+-- Slot IDs: https://warcraft.wiki.gg/wiki/Action_slot
+local actionBars = {
+    { binding = "ACTIONBUTTON",           button = "ActionButton",              slotStart = nil }, -- Bar 1 (dynamic)
+    { binding = "MULTIACTIONBAR1BUTTON",  button = "MultiBarBottomLeftButton",  slotStart = 61 },  -- Bar 2
+    { binding = "MULTIACTIONBAR2BUTTON",  button = "MultiBarBottomRightButton", slotStart = 49 },  -- Bar 3
+    { binding = "MULTIACTIONBAR3BUTTON",  button = "MultiBarRightButton",       slotStart = 25 },  -- Bar 4
+    { binding = "MULTIACTIONBAR4BUTTON",  button = "MultiBarLeftButton",        slotStart = 37 },  -- Bar 5
+    { binding = "MULTIACTIONBAR5BUTTON",  button = "MultiBar5Button",           slotStart = 145 }, -- Bar 6
+    { binding = "MULTIACTIONBAR6BUTTON",  button = "MultiBar6Button",           slotStart = 157 }, -- Bar 7
+    { binding = "MULTIACTIONBAR7BUTTON",  button = "MultiBar7Button",           slotStart = 169 }, -- Bar 8
+}
+
+-- Standalone modifier keys (ignore these; wait for the actual key of the combo)
+local modifierKeys = {
+    LSHIFT = true, RSHIFT = true, SHIFT = true,
+    LCTRL = true, RCTRL = true, LCONTROL = true, RCONTROL = true, CTRL = true, CONTROL = true,
+    LALT = true, RALT = true, ALT = true,
+    LMETA = true, RMETA = true, META = true,
+}
+
+-- Resolve the action slot currently shown on main-bar button i (page, stance, stealth, etc.)
+local function GetActionButtonSlot(index)
+    local button = _G["ActionButton"..index]
+    if button then
+        local action = button.action
+        if (type(action) ~= "number" or action < 1) and button.GetAttribute then
+            action = button:GetAttribute("action")
+        end
+        if type(action) == "number" and action > 0 then
+            return action
+        end
+    end
+    -- Fallback if the default button frame is missing
+    local page = GetActionBarPage() or 1
+    local bonus = GetBonusBarOffset() or 0
+    local numPages = NUM_ACTIONBAR_PAGES or 6
+    if bonus > 0 then
+        return (numPages + bonus - 1) * 12 + index
+    end
+    return (page - 1) * 12 + index
+end
+
+-- Collect every key bound to a command, including Alt/Ctrl/Shift combos (e.g. "ALT-1", "CTRL-SHIFT-Q")
+local function CollectKeys(command, clickCommand)
+    local keys, seen = {}, {}
+    local function add(...)
+        for i = 1, select("#", ...) do
+            local key = select(i, ...)
+            if type(key) == "string" and key ~= "" and not seen[key] then
+                seen[key] = true
+                table.insert(keys, key)
+            end
+        end
+    end
+    add(GetBindingKey(command))
+    -- Some bar addons bind via CLICK instead of ACTIONBUTTON / MULTIACTIONBAR*
+    if clickCommand then
+        add(GetBindingKey(clickCommand))
+    end
+    return keys
+end
+
+-- Best-effort name for whatever is on the slot so macros/items are not silently skipped
+local function GetSlotName(slot, actionType, id)
+    if actionType == "spell" then
+        local spellInfo = C_Spell.GetSpellInfo(id)
+        if spellInfo and spellInfo.name and spellInfo.name ~= "" then return spellInfo.name end
+        if C_Spell.GetSpellName then
+            local spellName = C_Spell.GetSpellName(id)
+            if spellName and spellName ~= "" then return spellName end
+        end
+    elseif actionType == "item" then
+        local itemName
+        if C_Item and C_Item.GetItemNameByID then
+            itemName = C_Item.GetItemNameByID(id)
+        end
+        if not itemName then itemName = GetItemInfo(id) end
+        if itemName and itemName ~= "" then return itemName end
+    elseif actionType == "macro" then
+        local macroName = GetActionText(slot)
+        if (not macroName or macroName == "") and type(id) == "number" then
+            macroName = GetMacroInfo(id)
+        end
+        if macroName and macroName ~= "" then return macroName end
+        return "Macro"
+    elseif actionType == "flyout" and GetFlyoutInfo then
+        local flyoutName = GetFlyoutInfo(id)
+        if flyoutName and flyoutName ~= "" then return flyoutName end
+    elseif actionType == "equipmentset" and type(id) == "string" and id ~= "" then
+        return id
+    elseif actionType == "companion" or actionType == "summonmount" or actionType == "summonpet" then
+        local spellInfo = C_Spell.GetSpellInfo(id)
+        if spellInfo and spellInfo.name and spellInfo.name ~= "" then return spellInfo.name end
+    end
+    local overlay = GetActionText(slot)
+    if overlay and overlay ~= "" then return overlay end
+    return actionType or "Action"
+end
 
 -- Function to scan action bars and find skills that actually have keybinds
 local function RefreshBinds()
     -- Clear the table for a fresh scan (useful if you changed specs/binds)
     activeBinds = {}
     
-    -- Loop through every action bar slot mapped above
-    for slot, command in pairs(slotToBinding) do
-        -- Get information about what is placed in this slot
-        local actionType, id = GetActionInfo(slot)
-        
-        -- If there is something in the slot (a spell, item, or macro)
-        if actionType and id then
-            -- Check if this specific slot has a keyboard bind assigned to it
-            local keys = {GetBindingKey(command)}
-            
-            -- If it has at least one bind
-            if #keys > 0 then
-                local name = ""
-                
-                -- Determine the name based on the action type
-                if actionType == "spell" then
-                    -- Use the modern C_Spell API to get spell info (required for 11.0+)
-                    local spellInfo = C_Spell.GetSpellInfo(id)
-                    if spellInfo then name = spellInfo.name end
-                elseif actionType == "item" then
-                    -- Get item name
-                    local itemName = GetItemInfo(id)
-                    if itemName then name = itemName end
-                elseif actionType == "macro" then
-                    -- Get macro name
-                    name = GetActionText(slot)
+    for _, bar in ipairs(actionBars) do
+        for i = 1, 12 do
+            local slot
+            if bar.slotStart then
+                -- Extra bars use a fixed slot range
+                slot = bar.slotStart + i - 1
+                local button = _G[bar.button..i]
+                if button then
+                    local action = button.action
+                    if type(action) == "number" and action > 0 then
+                        slot = action
+                    end
                 end
+            else
+                -- Main bar follows the currently visible page / bonus bar
+                slot = GetActionButtonSlot(i)
+            end
+            
+            -- Skip empty slots
+            if slot and HasAction(slot) then
+                local command = bar.binding..i
+                local keys = CollectKeys(command, "CLICK "..bar.button..i..":LeftButton")
                 
-                -- If we successfully found a name, save the data to our activeBinds table
-                if name and name ~= "" then
+                -- Include every bind WoW stored for this button (plain keys and Alt/Ctrl/Shift combos)
+                if #keys > 0 then
+                    local actionType, id = GetActionInfo(slot)
                     table.insert(activeBinds, {
-                        keys = keys,                      -- The key combination(s)
-                        name = name,                      -- The name of the ability
-                        icon = GetActionTexture(slot)     -- The icon texture path
+                        keys = keys,
+                        name = GetSlotName(slot, actionType, id),
+                        icon = GetActionTexture(slot)
                     })
                 end
             end
         end
     end
+end
+
+-- Convert engine key names (e.g. "SHIFT-Q", "BUTTON4") into readable bind text
+local function FormatKeys(keys)
+    local texts = {}
+    for _, key in ipairs(keys) do
+        -- GetBindingText localizes and pretty-prints the bind (Shift-Q, Mouse Button 4, etc.)
+        local display = GetBindingText(key)
+        if not display or display == "" then
+            display = key
+        end
+        table.insert(texts, display)
+    end
+    -- A slot can have more than one bind; show all of them
+    return table.concat(texts, "  /  ")
 end
 
 -- Function to pick and display the next random skill
@@ -131,9 +240,10 @@ local function NextBind()
     -- Retrieve the selected skill's data
     local bind = activeBinds[rand]
     
-    -- Update the UI with the new icon and text
+    -- Update the UI with the new icon, spell name, and gray keybind hint
     f.icon:SetTexture(bind.icon)
     f.text:SetText(bind.name)
+    f.bindText:SetText(FormatKeys(bind.keys))
     
     -- Store the correct key combination(s) for the input checker to verify later
     currentBindKeys = bind.keys
@@ -148,20 +258,22 @@ local function CheckInput(inputKey)
         return
     end
     
-    -- Ignore pure modifier key presses (e.g., pressing just 'Shift' without another key)
-    if inputKey:match("SHIFT") or inputKey:match("CTRL") or inputKey:match("ALT") or inputKey:match("META") then
+    -- Ignore pressing only a modifier; wait for the rest of the combo (e.g. Alt then 1)
+    if modifierKeys[inputKey] then
         return
     end
     
-    -- Build the modifier string exactly as WoW expects it (order matters: ALT-CTRL-SHIFT-META)
-    local modifier = ""
-    if IsAltKeyDown() then modifier = modifier .. "ALT-" end
-    if IsControlKeyDown() then modifier = modifier .. "CTRL-" end
-    if IsShiftKeyDown() then modifier = modifier .. "SHIFT-" end
-    if IsMetaKeyDown() then modifier = modifier .. "META-" end
-    
-    -- Combine the modifiers with the pressed key (e.g., "SHIFT-R" or "ALT-CTRL-F")
-    local pressedBind = modifier .. inputKey
+    -- If the engine already sent a full combo (e.g. "ALT-1"), use it as-is
+    local pressedBind = inputKey
+    if not inputKey:find("-", 1, true) then
+        -- Build the modifier string exactly as GetBindingKey stores it (ALT-CTRL-SHIFT-META)
+        local modifier = ""
+        if IsAltKeyDown() then modifier = modifier .. "ALT-" end
+        if IsControlKeyDown() then modifier = modifier .. "CTRL-" end
+        if IsShiftKeyDown() then modifier = modifier .. "SHIFT-" end
+        if IsMetaKeyDown() then modifier = modifier .. "META-" end
+        pressedBind = modifier .. inputKey
+    end
     
     -- Flag to track if the user pressed the right combination
     local match = false
