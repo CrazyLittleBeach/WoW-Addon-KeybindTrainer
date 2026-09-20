@@ -590,6 +590,16 @@ f:SetScript("OnMouseDown", function(self, button)
     if btnMap[button] then CheckInput(btnMap[button]) end
 end)
 
+-- Mouse wheel up/down (including Alt/Ctrl/Shift combos, e.g. SHIFT-MOUSEWHEELUP)
+f:EnableMouseWheel(true)
+f:SetScript("OnMouseWheel", function(self, delta)
+    if delta > 0 then
+        CheckInput("MOUSEWHEELUP")
+    else
+        CheckInput("MOUSEWHEELDOWN")
+    end
+end)
+
 -- Register slash commands to open/close the trainer
 SLASH_KEYBINDTRAINER1 = "/kbt"
 SLASH_KEYBINDTRAINER2 = "/keybindtrainer"
